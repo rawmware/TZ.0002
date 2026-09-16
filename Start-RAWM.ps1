@@ -30,5 +30,14 @@ if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
     throw "RAWM module is missing: $modulePath"
 }
 
-Import-Module $modulePath -Force
-Start-RAWMChat -Root $rawmRoot -Mode $Mode -Resume $Resume -New:$New -NoBanner:$NoBanner
+$instance=[Threading.Mutex]::new($false,'Local\TZ-Desktop-App')
+$owned=$false
+try {
+    try { $owned=$instance.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned=$true }
+    if (-not $owned) { Write-Host 'TZ is already open. Use the existing TZ window.' -ForegroundColor Yellow; return }
+    Import-Module $modulePath -Force
+    Start-RAWMChat -Root $rawmRoot -Mode $Mode -Resume $Resume -New:$New -NoBanner:$NoBanner
+} finally {
+    if ($owned) { $instance.ReleaseMutex() }
+    $instance.Dispose()
+}

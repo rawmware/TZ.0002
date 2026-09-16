@@ -13,6 +13,8 @@ $script:ActiveModelMode = $null
 $script:ServerProcess = $null
 $script:LastAnswer = ''
 $script:LastUsage = $null
+. (Join-Path $PSScriptRoot 'RAWMDebug.ps1')
+. (Join-Path $PSScriptRoot 'RAWMModels.ps1')
 . (Join-Path $PSScriptRoot 'RAWMAgent.ps1')
 . (Join-Path $PSScriptRoot 'RAWMRuntime.ps1')
 . (Join-Path $PSScriptRoot 'RAWMBrowser.ps1')
@@ -28,7 +30,7 @@ function Get-RAWMTextWidth {
 }
 
 function Write-RAWMWrappedText {
-    param([string]$Text, [hashtable]$State, [switch]$Flush)
+    param([string]$Text, [hashtable]$State, [switch]$Flush, [string]$Color='White')
     # Buffer only the unfinished word, so streaming still appears as it arrives.
     $State.Pending += $Text.Replace("`r", '').Replace("`t", '    ')
     while ($State.Pending.Length -gt 0) {
@@ -55,7 +57,7 @@ function Write-RAWMWrappedText {
                 if ($token -match '^ +$') { break }
             }
             $count = [Math]::Min($available, $token.Length)
-            Write-Host $token.Substring(0, $count) -NoNewline
+            Write-Host $token.Substring(0, $count) -NoNewline -ForegroundColor $Color
             $State.Column += $count
             $token = $token.Substring($count)
         }
@@ -64,13 +66,11 @@ function Write-RAWMWrappedText {
 
 function Write-RAWMColor {
     param([string]$Text, [string]$Color = 'White', [switch]$NoNewline)
-    $prefix = $script:Ansi[$Color]
-    if (-not $prefix) { $prefix = '' }
-    if ($NoNewline) { Write-Host "$prefix$Text$($script:Ansi.Reset)" -NoNewline }
+    $nativeColor=if ($Color -eq 'Amber') {'Yellow'} else {$Color}
+    if ($NoNewline) { Write-Host $Text -ForegroundColor $nativeColor -NoNewline }
     else {
-        Write-Host $prefix -NoNewline
-        Write-RAWMWrappedText -Text $Text -State @{ Pending=''; Column=0 } -Flush
-        Write-Host $script:Ansi.Reset
+        Write-RAWMWrappedText -Text $Text -State @{ Pending=''; Column=0 } -Flush -Color $nativeColor
+        Write-Host
     }
 }
 
@@ -88,6 +88,30 @@ function Get-RAWMPasscode {
         if (-not [string]::IsNullOrWhiteSpace($candidate)) { $passcode = $candidate.Trim() }
     }
     return Remove-RAWMControlSequence $passcode
+}
+
+function Set-RAWMPasscode {
+    param([string]$Name)
+    $candidate=$Name.Trim()
+    if ($candidate -notmatch '^[\p{L}\p{N}][\p{L}\p{N} _-]{0,31}$') {
+        throw 'Use 1-32 letters, numbers, spaces, underscores or hyphens, starting with a letter or number.'
+    }
+    $path=Join-Path $script:Root 'config/settings.local.json'
+    Assert-RAWMNoLinks $path
+    $updated=if (Test-Path -LiteralPath $path) { Read-RAWMJson $path } else { $script:Settings|ConvertTo-Json -Depth 30|ConvertFrom-Json }
+    if (-not $updated.PSObject.Properties['interface'] -or -not $updated.interface) {
+        $updated|Add-Member -NotePropertyName interface -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+    $updated.interface|Add-Member -NotePropertyName passcode -NotePropertyValue $candidate -Force
+    $temp=$path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+    try {
+        [IO.File]::WriteAllText($temp,($updated|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temp -Destination $path -Force
+    } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp } }
+    if (-not $script:Settings.PSObject.Properties['interface'] -or -not $script:Settings.interface) {
+        $script:Settings|Add-Member -NotePropertyName interface -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+    $script:Settings.interface|Add-Member -NotePropertyName passcode -NotePropertyValue $candidate -Force
 }
 
 function Write-RAWMBox {
@@ -273,12 +297,24 @@ function Invoke-RAWMCompletion {
     Start-RAWMServer $ModelMode
     $model = Get-RAWMModelConfig $ModelMode
     $uri = (Get-RAWMBackendUrl) + '/v1/chat/completions'
-    $body = @{
+    $payload = @{
         model = $model.Name; messages = @(Get-RAWMChatMessages -SystemInstruction $SystemInstruction); stream = $true
         stream_options = @{ include_usage = $true }; max_tokens = $model.MaxTokens
         temperature = $model.Temperature; chat_template_kwargs = @{ enable_thinking = $false }
-    } | ConvertTo-Json -Depth 12 -Compress
+    }
+    $native = $script:Settings.backend.type -eq 'ollama'
+    if ($native) {
+        $uri = (Get-RAWMBackendUrl) + '/api/chat'
+        $options=@{num_predict=$model.MaxTokens; temperature=$model.Temperature; num_ctx=[int]$script:Settings.backend.contextSize}
+        $entry=$script:Settings.models.$ModelMode
+        if ($entry.PSObject.Properties['numGpu']) { $options.num_gpu=[int]$entry.numGpu }
+        $payload=@{model=$model.Name; messages=$payload.messages; stream=$true; think=$false; keep_alive='10m'; options=$options}
+    }
+    $body=$payload | ConvertTo-Json -Depth 12 -Compress
+    Write-RAWMDebug 'request.started' @{model=$model.Name; route=$ModelMode; transport=$(if ($native) {'ollama'} else {'openai-compatible'}); messages=$payload.messages.Count}
     $client = [Net.Http.HttpClient]::new([Net.Http.HttpClientHandler]@{UseProxy=$false;AllowAutoRedirect=$false})
+    # The operation timer below owns cancellation; HttpClient's default is only 100s.
+    $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
     $request = New-Object Net.Http.HttpRequestMessage([Net.Http.HttpMethod]::Post, $uri)
     $request.Content = New-Object Net.Http.StringContent($body, [Text.Encoding]::UTF8, 'application/json')
     $started = Get-Date
@@ -293,6 +329,7 @@ function Invoke-RAWMCompletion {
     $cts=[Threading.CancellationTokenSource]::new()
     try {
         $response = Wait-RAWMTask ($client.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cts.Token)) $operation
+        Write-RAWMDebug 'response.headers' @{status=[int]$response.StatusCode; seconds=[Math]::Round($operation.Clock.Elapsed.TotalSeconds,2)}
         if (-not $response.IsSuccessStatusCode) {
             $detail = Wait-RAWMTask ($response.Content.ReadAsStringAsync($cts.Token)) $operation
             throw "Local model request failed ($([int]$response.StatusCode)): $detail"
@@ -302,26 +339,42 @@ function Invoke-RAWMCompletion {
         while ($true) {
             $line = Wait-RAWMTask ($reader.ReadLineAsync()) $operation -Quiet:($null -ne $firstToken)
             if ($null -eq $line) { break }
-            if (-not $line.StartsWith('data:')) { continue }
-            $data = $line.Substring(5).Trim()
+            if (-not $native -and -not $line.StartsWith('data:')) { continue }
+            $data = if ($native) { $line.Trim() } else { $line.Substring(5).Trim() }
             if ($data -eq '[DONE]') { break }
             if (-not $data) { continue }
             $event = $data | ConvertFrom-Json
             if ($event.PSObject.Properties['usage'] -and $event.usage) { $usage = $event.usage }
             $piece = $null
+            if ($native) {
+                if ($event.PSObject.Properties['error']) { throw "Ollama failed: $($event.error)" }
+                if ($event.PSObject.Properties['message']) { $piece=$event.message.content }
+                if ($event.done) {
+                    $usage=[pscustomobject]@{prompt_tokens=$event.prompt_eval_count; completion_tokens=$event.eval_count}
+                    Write-RAWMDebug 'runtime.statistics' @{loadSeconds=[Math]::Round($event.load_duration/1e9,3); promptSeconds=[Math]::Round($event.prompt_eval_duration/1e9,3); generationSeconds=[Math]::Round($event.eval_duration/1e9,3); generationTokensPerSecond=$(if ($event.eval_duration -gt 0) {[Math]::Round($event.eval_count/($event.eval_duration/1e9),1)} else {0})} -Quiet
+                }
+            }
             if ($event.PSObject.Properties['choices'] -and $event.choices.Count -gt 0) {
                 $delta = $event.choices[0].delta
                 if ($delta -and $delta.PSObject.Properties['content']) { $piece = $delta.content }
             }
             if ($null -ne $piece -and $piece.Length -gt 0) {
-                if (-not $firstToken) { $firstToken = Get-Date }
+                if (-not $firstToken) {
+                    $firstToken = Get-Date
+                    Write-RAWMDebug 'response.first_token' @{seconds=[Math]::Round(($firstToken-$started).TotalSeconds,2)}
+                }
                 $safe = Remove-RAWMControlSequence ([string]$piece)
                 [void]$builder.Append($safe)
                 Write-RAWMWrappedText -Text $safe -State $wrapState
             }
+            if ($native -and $event.done) { break }
         }
         Write-RAWMWrappedText -Text '' -State $wrapState -Flush
         Write-Host
+        if (-not $builder.ToString().Trim()) { throw 'The model returned an empty answer.' }
+    } catch {
+        Write-RAWMDebug 'response.failed' @{seconds=[Math]::Round($operation.Clock.Elapsed.TotalSeconds,2); kind=$_.Exception.GetType().Name}
+        throw
     } finally {
         $cts.Cancel()
         if ($reader) { $reader.Dispose() }
@@ -338,6 +391,7 @@ function Invoke-RAWMCompletion {
     $speed = if ($elapsed -gt 0 -and $completionTokens -gt 0) { [Math]::Round($completionTokens / $elapsed, 1) } else { 0 }
     $script:LastUsage = [pscustomobject]@{ Prompt=$promptTokens; Completion=$completionTokens; Seconds=[Math]::Round($elapsed,2); TokensPerSecond=$speed; Model=$model.Name; Mode=$ModelMode }
     $script:LastAnswer = $answer
+    Write-RAWMDebug 'response.completed' @{model=$model.Name; seconds=[Math]::Round($elapsed,2); firstTokenSeconds=[Math]::Round(($firstToken-$started).TotalSeconds,2); inputTokens=$promptTokens; outputTokens=$completionTokens; endToEndTokensPerSecond=$speed}
     $script:Session.totals.promptTokens += $promptTokens
     $script:Session.totals.completionTokens += $completionTokens
     $script:Session.totals.turns += 1
@@ -394,7 +448,7 @@ function Get-RAWMChatMessages {
     # Refresh policy for resumed sessions and reflect tool toggles on every turn.
     if (-not $SystemInstruction) {
         $behavior = Get-Content -LiteralPath (Join-Path $script:Root 'context\RAWM-BEHAVIOR.md') -Raw -Encoding UTF8
-        $SystemInstruction = $behavior + "`nCurrent local capabilities: " + (Get-RAWMCapabilityText -ForModel)
+        $SystemInstruction = "Your application name is $(Get-RAWMPasscode). You are an AI assistant, not a human owner. This name is a display label, not the user's name.`n" + $behavior + "`nCurrent local capabilities: " + (Get-RAWMCapabilityText -ForModel)
     }
     @{role='system'; content=$SystemInstruction}
     $script:Session.messages | Where-Object { $_.role -ne 'system' }
@@ -408,6 +462,8 @@ function Show-RAWMHelp {
         '/auto /fast /code Set model routing', '/model            Show configured models',
         '/workers          Show worker backends', '/worker auto|pi|qwen|codex|local  Choose one',
         '/usage            Show last and session usage', '/paste            Enter multiline input',
+        '/debug [on|off|stats] Live activity and runtime statistics',
+        '/passcode [name]   Show or change the app name (not a password)',
         '/copy             Copy last answer', '/copy code         Copy first code block',
         '/export           Export this chat to Markdown', '/stop             Stop the local model server',
         '/agent            Local actions, tools, and status', '/act <request>    Plan a local action',
@@ -422,6 +478,16 @@ function Invoke-RAWMCommand {
     $command = $parts[0].ToLowerInvariant()
     $argument = if ($parts.Count -gt 1) { $parts[1] } else { '' }
     switch ($command) {
+        '/passcode' {
+            if ($argument) { Set-RAWMPasscode $argument; Write-RAWMColor "App name saved: $(Get-RAWMPasscode). It takes effect now and on restart." Green }
+            else { Write-RAWMColor "Current app name: $(Get-RAWMPasscode). Change it with /passcode TZ. This is a display label, not an access password." Cyan }
+        }
+        '/debug' {
+            if ($argument -eq 'on') { $script:DebugEnabled=$true }
+            elseif ($argument -eq 'off') { $script:DebugEnabled=$false }
+            elseif ($argument -and $argument -ne 'stats') { throw 'Use /debug, /debug stats, /debug on, or /debug off.' }
+            Show-RAWMDebug
+        }
         '/help' { Show-RAWMHelp }
         '/workers' { foreach ($line in (Get-RAWMWorkerSummary)) { Write-RAWMColor $line Gray } }
         '/worker' {
@@ -437,18 +503,8 @@ function Invoke-RAWMCommand {
         '/auto' { $script:Mode='auto'; Write-RAWMColor 'Routing: AUTO' Green }
         '/fast' { $script:Mode='fast'; Write-RAWMColor 'Routing: FAST' Green }
         '/code' { $script:Mode='code'; Write-RAWMColor 'Routing: CODE' Green }
-        '/model' {
-            $fast=Get-RAWMModelConfig fast; $code=Get-RAWMModelConfig code
-            if ($script:Settings.backend.type -eq 'ollama') {
-                $tags=Invoke-RestMethod -Uri ((Get-RAWMBackendUrl)+'/api/tags') -TimeoutSec 5 -NoProxy -MaximumRedirection 0
-                $fastState=if ($fast.Name -cin @($tags.models.name)) {'installed'} else {'missing'}
-                $codeState=if ($code.Name -cin @($tags.models.name)) {'installed'} else {'missing'}
-            } else {
-            $fastState = if (Test-Path -LiteralPath $fast.Path) { 'installed' } else { 'missing' }
-            $codeState = if (Test-Path -LiteralPath $code.Path) { 'installed' } else { 'missing' }
-            }
-            Write-RAWMBox 'Models' @("Runtime: $($script:Settings.backend.type)", "FAST: $($fast.Name) [$fastState]", "CODE: $($code.Name) [$codeState]", "Routing: $($script:Mode.ToUpperInvariant())") 'Cyan'
-        }
+        '/model' { Show-TZModels $argument }
+        '/models' { Show-TZModels $argument }
         '/usage' {
             Write-RAWMUsage
             Write-RAWMColor "Session: $($script:Session.totals.turns) turns, $($script:Session.totals.promptTokens) in, $($script:Session.totals.completionTokens) out" Gray
@@ -502,6 +558,7 @@ function Start-RAWMChat {
     Initialize-RAWMAgent
     $script:Mode = $Mode
     if ($Resume) { Resume-RAWMSession $Resume } else { New-RAWMSession }
+    if ($script:DebugEnabled) { Write-RAWMDebugLine 'enabled' @{statistics='/debug'; hide='/debug off'} }
     if (-not $NoBanner) {
         Write-RAWMBox (Get-RAWMPasscode) @('LOCAL  |  Private', "Routing: $($script:Mode.ToUpperInvariant())  |  Session: $($script:Session.id)", "Agent: $(if (-not $script:Agent.Enabled) {'OFF'} elseif (-not $script:Agent.Tools.Count) {'UNAVAILABLE'} else {'ON'})") 'Cyan'
     }

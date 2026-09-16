@@ -261,6 +261,9 @@ function Get-RAWMNotepadRequest {
     } elseif ($payload -match '(?i)(?:[,;]|\b(?:and|then)\b)\s*(?:then\s+)?(?:open|launch|start|write|save|send|delete|remove|rename|create|run|close)\b') {
         return $null
     }
+    if ($s -notmatch '["'']' -and $payload -match '^(?i)(?:a\s+)?(?:big\s+)?ascii\s+smiley[.!]?$') {
+        $payload="     .-''''''-.`n   .'          '.`n  /   O      O   \`n |                |`n |   \________/   |`n  \              /`n   '.          .'`n     '-......-'"
+    }
     return @{Text=$payload; NeedsText=$false}
 }
 
@@ -487,6 +490,7 @@ function Write-RAWMAudit {
         }
     }
     $record = @{version=1; timestamp=[DateTimeOffset]::UtcNow.ToString('o'); planId=$Id; event=$Event; tool=$tool; inputs=$inputs; status=$Status; detail=$Detail}
+    Write-RAWMDebug 'agent.event' @{plan=$Id; event=$Event; tool=$tool; status=$Status}
     [IO.File]::AppendAllText($path, (($record | ConvertTo-Json -Depth 8 -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
 }
 
@@ -695,12 +699,16 @@ function Invoke-RAWMPlan {
         # Validate again immediately before use, including path and enabled-tool policy.
         [void](Assert-RAWMPlan $Plan)
         Write-RAWMAudit $Id 'tool' $step 'started' 'Execute an approved local action.'
+        $toolClock=[Diagnostics.Stopwatch]::StartNew()
         try {
             $result = Invoke-RAWMTool $step
         } catch {
             Write-RAWMAudit $Id 'tool' $step 'failed' 'Stopped; no automatic retry. Inspect state before retrying.'
             $results.Add("Stopped: $($_.Exception.Message) Earlier completed steps remain in place.")
             break
+        } finally {
+            $toolClock.Stop()
+            Write-RAWMDebug 'tool.timing' @{tool=$step.tool; seconds=[Math]::Round($toolClock.Elapsed.TotalSeconds,3)}
         }
         try {
             if ($step.tool -eq 'worker.delegate') { Write-RAWMAudit $Id 'tool' $step 'reported' 'Worker exited and returned a report; outcome not independently verified.' }

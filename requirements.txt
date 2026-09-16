@@ -1,0 +1,2 @@
+# Optional for PDF reading; text, web, commands and Ollama use Python's standard library.
+pypdf>=6.1,<7

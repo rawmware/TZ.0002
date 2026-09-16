@@ -30,4 +30,8 @@ __pycache__/
 auth.json
 credentials.json
 config/settings.local.json
+config/tz.local.json
 *.backup-*
+
+/archive/
+*.legacy-backup

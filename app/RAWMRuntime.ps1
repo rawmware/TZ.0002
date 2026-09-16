@@ -8,6 +8,7 @@ function New-RAWMOperation {
             [Console]::TreatControlCAsInput=$true
         }
     } catch {}
+    Write-RAWMDebug 'operation.started' @{operation=$Label; timeoutSeconds=$TimeoutSeconds}
     return @{Label=$Label; Clock=[Diagnostics.Stopwatch]::StartNew(); Timeout=$TimeoutSeconds; NextProgress=5; Previous=$previous}
 }
 
@@ -17,6 +18,7 @@ function Close-RAWMOperation {
         try { [Console]::TreatControlCAsInput=[bool]$Operation.Previous } catch {}
     }
     $Operation.Clock.Stop()
+    Write-RAWMDebug 'operation.ended' @{operation=$Operation.Label; seconds=[Math]::Round($Operation.Clock.Elapsed.TotalSeconds,2)} -Quiet
 }
 
 function Update-RAWMOperation {
@@ -25,7 +27,8 @@ function Update-RAWMOperation {
     $seconds=$Operation.Clock.Elapsed.TotalSeconds
     if ($seconds -ge $Operation.Timeout) { throw "$($Operation.Label) timed out after $([int]$Operation.Timeout)s. No completion was verified." }
     if (-not $Quiet -and $seconds -ge $Operation.NextProgress) {
-        Write-RAWMColor "$($Operation.Label) | $([int]$seconds)s elapsed | Esc or Ctrl+C cancels in this terminal." Gray
+        if (-not $script:DebugEnabled) { Write-RAWMColor "$($Operation.Label) | $([int]$seconds)s elapsed | Esc or Ctrl+C cancels in this terminal." Gray }
+        Write-RAWMDebug 'operation.waiting' @{operation=$Operation.Label; elapsedSeconds=[int]$seconds; remainingSeconds=[Math]::Max(0,[int]($Operation.Timeout-$seconds)); cancel='Esc / Ctrl+C'}
         $Operation.NextProgress=$seconds+5
     }
 }
