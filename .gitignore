@@ -1,0 +1,33 @@
+# Private runtime state and large local dependencies
+data/
+exports/
+workspace/
+models/*.gguf
+runtime/
+tests/.runs/
+.tmp
+
+# All local model weights and partial downloads
+/models/*
+!/models/.gitkeep
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.partial
+
+# Local dependencies, caches and credentials
+node_modules/
+.venv/
+__pycache__/
+.codex/
+.agents/
+.env
+.env.*
+!.env.example
+auth.json
+credentials.json
+config/settings.local.json
+*.backup-*

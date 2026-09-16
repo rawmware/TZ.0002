@@ -1,0 +1,2 @@
+Write a PowerShell function named Get-Greeting that returns "hello". Keep it short.
+/exit

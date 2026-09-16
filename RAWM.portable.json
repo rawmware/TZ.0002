@@ -1,0 +1,6 @@
+{
+  "packageId": "rawm-portable-roman-v1",
+  "formatVersion": 1,
+  "displayName": "RAWM",
+  "entryPoint": "Start-RAWM.ps1"
+}

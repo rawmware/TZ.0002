@@ -1,0 +1,55 @@
+{
+  "backend": {
+    "type": "llama.cpp",
+    "host": "127.0.0.1",
+    "port": 18080,
+    "contextSize": 4096,
+    "gpuLayers": "auto",
+    "startupTimeoutSeconds": 300
+  },
+  "models": {
+    "fast": {
+      "name": "Qwen3.5 0.8B Q4_K_M",
+      "file": "models/Qwen3.5-0.8B-Q4_K_M.gguf",
+      "maxTokens": 384,
+      "temperature": 0.25
+    },
+    "code": {
+      "name": "Qwen3.5 4B Q4_K_M",
+      "file": "models/Qwen3.5-4B-Q4_K_M.gguf",
+      "maxTokens": 2048,
+      "temperature": 0.15
+    }
+  },
+  "routing": {
+    "default": "auto"
+  },
+  "agent": {
+    "enabled": true,
+    "plannerModel": "code",
+    "tools": ["notepad.write", "browser.open", "workspace.list", "file.read", "file.create", "file.rename", "system.info", "worker.delegate"]
+  },
+  "workers": {
+    "default": "auto",
+    "order": ["pi", "qwen", "local"],
+    "pi": {
+      "enabled": true,
+      "model": "gemma4:26b",
+      "provider": "ollama"
+    },
+    "qwen": {
+      "enabled": true,
+      "model": "gemma4:26b",
+      "baseUrl": "http://127.0.0.1:11434/v1"
+    },
+    "codex": {
+      "enabled": true,
+      "model": "gpt-5.6-luna"
+    }
+  },
+  "interface": {
+    "passcode": "roman",
+    "unicodeBorders": true,
+    "showUsageAfterEachTurn": true
+  }
+}
