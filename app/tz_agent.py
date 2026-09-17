@@ -117,6 +117,11 @@ class Agent:
         self.pending_request = None
         self.opencode_session = None
         self.last_backend = None
+        # A worker (see tz_team) narrows these; the main agent keeps the full set.
+        self.tools = TOOLS
+        self.system = SYSTEM
+        self.rounds = 8
+        self.terminal = None
         from app.tz_install import settings
         self.label = settings().get('passcode', 'TZ')
         self.id = time.strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:6]
@@ -124,6 +129,24 @@ class Agent:
         from app.tz_preview import Preview
         self.preview = Preview(self.workspace)
         atexit.register(self.preview.close)
+
+    def worker(self, name, role, tools=None, rounds=4):
+        """A bounded subagent: same workspace, model and endpoint; its own context and a narrower tool set."""
+        child = Agent.__new__(Agent)
+        child.__dict__.update(self.__dict__)
+        child.messages, child.capabilities, child.pending_request = [], None, None
+        child.opencode_session = child.last_backend = child.last_response = None
+        child.model, child.task_model, child.routing = self.task_model, self.task_model, 'manual'
+        child.model_description = self.task_model
+        child.label = f'{self.label}/{name}'
+        child.id = self.id + '-' + re.sub(r'[^a-zA-Z0-9]+', '-', name).strip('-').lower()[:24]
+        allowed = set(tools) if tools is not None else {t['function']['name'] for t in TOOLS}
+        child.tools = [t for t in TOOLS if t['function']['name'] in allowed]
+        child.system = (SYSTEM + '\n\nYou are the worker "' + name + '" on a small team. Your one job: ' + role.strip() +
+                        '\nDeliver only that. Do not start unrelated work. Finish with a short plain-text report of what '
+                        'you actually did and what remains unverified.')
+        child.rounds = rounds
+        return child
 
     def local_model(self):
         endpoint = urllib.parse.urlsplit(self.base_url)
@@ -218,8 +241,8 @@ class Agent:
                                 'status': status, 'detail': str(result)[:200] if status == 'error' else ''}) + '\n')
 
     def tool(self, name, args, explicit=False):
-        spec = next((t['function']['parameters'] for t in TOOLS if t['function']['name'] == name), None)
-        if spec is None: raise ValueError('Unknown tool: ' + name)
+        spec = next((t['function']['parameters'] for t in self.tools if t['function']['name'] == name), None)
+        if spec is None: raise ValueError('Tool not available here: ' + name)
         if not isinstance(args, dict) or set(args) - set(spec['properties']) or set(spec['required']) - set(args):
             raise ValueError('Invalid arguments for ' + name)
         for key, value in args.items():
@@ -359,7 +382,7 @@ class Agent:
                 'options': {'num_ctx': 8192, 'num_predict': 2048, 'temperature': 0.15}}
         # Preserve the legacy runtime's measured GPU workaround for this model.
         if self.model == 'gemma3:1b': body['options']['num_gpu'] = 0
-        if 'tools' in self.capabilities: body['tools'] = TOOLS
+        if 'tools' in self.capabilities and self.tools: body['tools'] = self.tools
         else:
             body['messages'] = [dict(m) for m in messages]
             body['messages'][0] = {'role': 'system', 'content':
@@ -478,6 +501,10 @@ class Agent:
             self.display(result)
             return result
         if text.startswith('/workspace '): return self.change_workspace(text[11:])
+        if re.match(r'/(?:team|agents|summon)\b', text.strip()):
+            from app.tz_team import Team
+            self.route(text, coding=True)
+            return Team(self).run(text)
         if text.strip() == '/opencode' or text.startswith('/opencode '):
             from app.tz_opencode import run
             if text.strip() == '/opencode' and not sys.stdin.isatty():
@@ -517,9 +544,13 @@ class Agent:
                 self.route(text, coding=True)
                 return run(self, text)
         self.route(text)
+        return self.converse(text)
+
+    def converse(self, text):
+        """The bounded model/tool loop for one request. Routing has already chosen the model."""
         self.messages.append({'role': 'user', 'content': text})
         seen = set()
-        for _ in range(8):
+        for _ in range(self.rounds):
             # Trim only at complete user-turn boundaries; never orphan tool responses.
             history = self.messages[:]
             while len(json.dumps(history)) > 22000:
@@ -558,7 +589,7 @@ class Agent:
                     self.emit('[tool error] ' + clean(exc))
                 self.messages.append({'role': 'tool', 'tool_name': name, 'content': json.dumps(result, ensure_ascii=False)})
             self.save()
-        raise RuntimeError('Stopped after eight agent rounds. Completed actions are logged; task completion is unverified.')
+        raise RuntimeError(f'Stopped after {self.rounds} agent rounds. Completed actions are logged; task completion is unverified.')
 
 
 HELP = '''TZ - local task agent
@@ -575,6 +606,7 @@ HELP = '''TZ - local task agent
   /status | /tools             Show runtime, machine specs and tools
   /workspace [PATH]            Show or switch the trusted write workspace
   /passcode NAME               Change display name AND register a launch command
+  /team TASK                   Summon 2-4 bounded local subagents; or /team JOB | JOB | JOB
   /opencode task               Run a coding task through OpenCode and local Ollama
   /opencode                    Open the full OpenCode terminal UI
   /clear | /exit               Fresh context or quit
@@ -623,6 +655,7 @@ def main(argv=None):
     terminal = Terminal(agent)
     atexit.register(terminal.close)
     agent.emit = terminal.emit
+    agent.terminal = terminal
     terminal.header()
     terminal.specs()
     while True:

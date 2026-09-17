@@ -38,7 +38,17 @@ Create an HTML file with a heading Hello Roman and verify it.
 
 Direct tools run without asking a model for permission. TZ's built-in writes verify the bytes and ask before replacing existing files, with backups. OpenCode is permitted to edit workspace files and shows completed/failed tool events. Its shell commands require interactive approval; use `/opencode` for those workflows. Explicit `/run ["python", "script.py"]` runs that program without assuming a shell.
 
-`/help`, `/tools`, `/status`, `/models`, `/use MODEL`, `/clear`, `/exit` are available. `Ctrl+C` cancels model generation; incomplete output is never labeled verified. `python tz.py --prompt "REQUEST"` runs one task for scripts. `--workspace PATH` selects an existing project directory. `--resume SESSION_ID` resumes a local session.
+`/help`, `/tools`, `/status`, `/specs`, `/team`, `/models`, `/use MODEL`, `/clear`, `/exit` are available. `Ctrl+C` cancels model generation; incomplete output is never labeled verified. `python tz.py --prompt "REQUEST"` runs one task for scripts. `--workspace PATH` selects an existing project directory. `--resume SESSION_ID` resumes a local session.
+
+## Teams: summoning bounded subagents
+
+`/team TASK` summons two to four local subagents (Claude Code calls these
+*subagents*): the lead plans the split, each worker gets one deliverable, an empty
+context, read-only tools and a four-round limit, and runs on one inference slot by
+default. `/team JOB ONE | JOB TWO` splits it yourself. `--write` lets workers create
+files, `--slots N` runs them in parallel, `--raw` skips the lead summary. Every team
+leaves a receipt under `data/tz/teams/` with each worker's status, tools, files and
+report. See [docs/TZ-TEAM-SUBAGENTS-2026-09-17.md](docs/TZ-TEAM-SUBAGENTS-2026-09-17.md).
 
 ## Terminal, routing and HTML previews
 
@@ -90,7 +100,7 @@ runs open the file directly; use the interactive session for live preview.
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-Tests cover original file-request routing, real launch aliases, file verification, command execution, OpenCode routing and model timeout/truncation. CI runs the portable tests on Windows, Linux and macOS. Desktop live tests used Windows, local Ollama and OpenCode 1.18.31; see the build notes for evidence and limits.
+Tests cover original file-request routing, real launch aliases, file verification, command execution, OpenCode routing, model timeout/truncation, the terminal layer and teams. CI installs `requirements.txt` and runs the whole suite on Windows, Linux and macOS. Desktop live tests used Windows, local Ollama and OpenCode 1.18.31; see the build notes for evidence and limits.
 
 - [Laptop setup and sync boundaries](docs/TZ-LAPTOP-SETUP.md)
 - [Boris Cherny research, architecture decisions and fixes](docs/TZ-BORIS-AND-BUILD-NOTES.md)

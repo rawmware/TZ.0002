@@ -2,7 +2,7 @@
 
 **Author:** Roman (RawmWare) · **Date:** 2026-09-17
 **Scope:** `app/tz_terminal.py`, `app/tz_agent.py` (+ tests)
-**Status:** Spec only — no code changed in this pass. Next session implements.
+**Status:** Implemented — §1, §2.1-2.3, §2.5 in `docs/TZ-UX-HARDWARE-AND-CHAT-2026-09-17.md`; §2.4 persistent status line and the `/team` subagents in `docs/TZ-TEAM-SUBAGENTS-2026-09-17.md`.
 **Repo:** https://github.com/rawmware/TZ.0002 — **all changes must land there.**
 See §5; read it *before* writing code, not after.
 

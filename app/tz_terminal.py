@@ -224,6 +224,8 @@ class Terminal:
         self.live = None
         self.verbose = True
         self.reply_open = False
+        self.reply_title = None
+        self.note = None
         self.code_lines = None
         self.code_language = None
         if self.enabled:
@@ -338,7 +340,7 @@ class Terminal:
         self.reply_open = True
         from app.tz_agent import clean
         self.console.print()
-        self.console.rule(f'AI  ·  {clean(self.agent.model)}', align='left', style='green')
+        self.console.rule(self.reply_title or f'AI  ·  {clean(self.agent.model)}', align='left', style='green')
 
     def close_reply(self, note=''):
         if self.code_lines is not None: self.print_code()
@@ -402,16 +404,45 @@ class Terminal:
         self.console.print(Panel(table, title=title, title_align='left',
                                  border_style='cyan', padding=(1, 2)))
 
+    def table(self, title, columns, rows):
+        """A small bordered table, e.g. a team plan. Plain columns when redirected."""
+        if not self.enabled:
+            widths = [max(len(str(c)), *(len(str(r[i])) for r in rows)) for i, c in enumerate(columns)]
+            self.emit(title)
+            self.emit('  '.join(str(c).ljust(widths[i]) for i, c in enumerate(columns)))
+            for row in rows: self.emit('  '.join(str(v).ljust(widths[i]) for i, v in enumerate(row)))
+            return
+        from rich.table import Table
+        from app.tz_agent import clean
+        grid = Table(title=title, title_justify='left', border_style='cyan', header_style='bold cyan',
+                     padding=(0, 1), show_edge=True)
+        for column in columns: grid.add_column(str(column), overflow='fold')
+        for row in rows: grid.add_row(*(clean(v) for v in row))
+        self.console.print()
+        self.console.print(grid, width=self.measure())
+
     # ------------------------------------------------------------------- input
+
+    def status_line(self):
+        """Model, route, workspace and session: the persistent answer to "what am I running"."""
+        from app.tz_agent import clean
+        return (f'{clean(self.agent.model)} · {self.agent.routing.upper()} · '
+                f'{os.path.basename(str(self.agent.workspace)) or str(self.agent.workspace)} · {self.agent.id}')
 
     def toolbar(self):
         """One row, always. The second GPU line would push the input area off short windows."""
-        text = self.hardware.readings.replace('\n', '  ')
+        text = self.status_line() + '  |  ' + self.hardware.readings.replace('\n', '  ')
         try:
             typed = len(self.session.default_buffer.text)
         except Exception:
             typed = 0
         if typed > 120: text += f'  |  {typed} chars'
+        try:
+            width = self.console.width
+        except Exception:
+            width = 0
+        if width and len(text) > width:
+            text = text[:max(0, width - 1)] + '…'
         return text
 
     def read(self):
@@ -450,8 +481,9 @@ class Terminal:
         started = time.monotonic()
         def render():
             # Fixed height, always. The reply prints above this block, never inside it.
+            note = f'  ·  {self.note}' if self.note else ''
             return Panel(Text(f'ACTIVE  ·  {time.monotonic() - started:.0f}s  ·  '
-                              f'{self.agent.routing.upper()}  ·  Ctrl+C cancels\n'
+                              f'{self.agent.routing.upper()}{note}  ·  Ctrl+C cancels\n'
                               + self.hardware.readings, style='cyan'), border_style='dim cyan')
         note = ''
         with Live(console=self.console, get_renderable=render, refresh_per_second=2,
@@ -469,6 +501,7 @@ class Terminal:
                 self.flush_stream()
                 self.close_reply(note)
                 self.live = None
+                self.reply_title = self.note = None
 
     def close(self):
         self.hardware.close()
