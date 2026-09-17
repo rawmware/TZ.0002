@@ -42,6 +42,7 @@ def config(agent):
 def run(agent, prompt=None):
     exe = executable()
     if not exe: raise RuntimeError('OpenCode is not installed. Run: npm i -g opencode-ai')
+    agent.local_model()
     env = os.environ.copy()
     env['OPENCODE_CONFIG_CONTENT'] = json.dumps(config(agent))
     args = [exe]
@@ -64,7 +65,7 @@ def run(agent, prompt=None):
 
     threading.Thread(target=read, daemon=True).start()
     started, notice, completed, errors, tail = time.monotonic(), 5, False, [], []
-    agent.emit('[OpenCode] ' + agent.model + ' | local Ollama | Ctrl+C cancels')
+    agent.emit('[OpenCode] ' + agent.label + ' · ' + agent.model_description + ' · configured model')
     try:
         while True:
             elapsed = time.monotonic() - started
@@ -91,6 +92,12 @@ def run(agent, prompt=None):
                 state = part.get('state') or {}
                 agent.emit('[OpenCode tool] ' + part.get('tool', '') + ': ' + state.get('status', ''))
                 if state.get('status') == 'error': errors.append(str(state.get('error', 'Tool failed')))
+                if state.get('status') == 'completed' and part.get('tool') in ('write', 'edit'):
+                    value = (state.get('input') or {}).get('filePath')
+                    if value:
+                        path = agent.path(value)
+                        if path.is_file() and path.is_relative_to(agent.workspace) and path.suffix.lower() in ('.html', '.htm'):
+                            agent.display(agent.preview.open(path))
             if event.get('type') == 'error': errors.append(str(event.get('error', event)))
             if event.get('type') == 'step_finish' and part.get('reason') in ('stop', 'end_turn'):
                 completed = True
@@ -99,6 +106,7 @@ def run(agent, prompt=None):
             detail = '; '.join(errors) or ''.join(tail)[-1200:]
             raise RuntimeError(f'OpenCode did not verify completion (exit {code}). {detail}')
         agent.audit('opencode', 'ok', '')
+        agent.astra(agent.model, 'OpenCode completed | local Ollama configured; served model not reported')
         agent.save()
         return {'backend': 'opencode', 'exit_code': code, 'completed': True, 'session': agent.opencode_session}
     finally:

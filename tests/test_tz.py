@@ -20,8 +20,13 @@ class AgentTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.agent = Agent(self.root, emit=lambda *a, **kw: None, confirm=lambda _: False)
+        self.browser = patch('app.tz_preview.webbrowser.open', return_value=True)
+        self.browser.start()
 
-    def tearDown(self): self.tmp.cleanup()
+    def tearDown(self):
+        self.agent.preview.close()
+        self.browser.stop()
+        self.tmp.cleanup()
 
     def test_original_path_first_request_reads_without_model(self):
         path = self.root / 'AGENTS.md'
@@ -121,7 +126,7 @@ class StreamTests(unittest.TestCase):
         def launch(*a, **kw): return original([sys.executable, '-c', script], **kw)
         with tempfile.TemporaryDirectory() as tmp:
             agent = Agent(tmp, emit=lambda *a, **k: None)
-            with patch('app.tz_opencode.executable', return_value=sys.executable), patch('app.tz_opencode.subprocess.Popen', side_effect=launch):
+            with patch.object(agent, 'local_model'), patch('app.tz_opencode.executable', return_value=sys.executable), patch('app.tz_opencode.subprocess.Popen', side_effect=launch):
                 with self.assertRaisesRegex(RuntimeError, 'disk full'): run(agent, 'write a file')
 
     def test_timeout_and_truncated_stream_are_not_success(self):

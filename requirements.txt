@@ -1,2 +1,5 @@
 # Optional for PDF reading; text, web, commands and Ollama use Python's standard library.
 pypdf>=6.1,<7
+rich>=13,<15
+prompt_toolkit>=3.0,<4
+psutil>=5.9,<8
