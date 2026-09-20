@@ -1,4 +1,5 @@
 import contextlib
+from datetime import datetime, timezone
 import io
 import json
 from pathlib import Path
@@ -152,6 +153,126 @@ class StreamTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'without completion'):
                 agent.stream([{'role': 'user', 'content': 'test'}])
         finally: server.shutdown(); server.server_close()
+
+
+DDG_HTML = '''<html><body><div id="links">
+<div class="result results_links results_links_deep web-result">
+ <h2 class="result__title"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FJames_Gandolfini&amp;rut=abc">James Gandolfini - Wikipedia</a></h2>
+ <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FJames_Gandolfini&amp;rut=abc"><b>James</b> John <b>Gandolfini</b> (September 18, 1961 &#x2013; June 19, 2013) was an American actor.</a>
+</div>
+<div class="result results_links results_links_deep web-result">
+ <h2 class="result__title"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.britannica.com%2Fbiography%2FJames-Gandolfini&amp;rut=def">James Gandolfini | Biography &amp; Facts - Britannica</a></h2>
+ <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.britannica.com%2Fbiography%2FJames-Gandolfini&amp;rut=def">American actor, best known for Tony Soprano.</a>
+</div></div></body></html>'''
+
+JUNK_HTML = '''<html><body>
+<a class="result__a" href="https://current.com/">Current | Mobile Banking</a><a class="result__snippet" href="https://current.com/">Bank with Current and get paid early.</a>
+<a class="result__a" href="https://dict.baidu.com/current">current - Baidu dictionary</a><a class="result__snippet" href="https://dict.baidu.com/current">current adj. happening now</a>
+<a class="result__a" href="https://en.wikipedia.org/wiki/Electric_current">Electric current - Wikipedia</a><a class="result__snippet" href="https://en.wikipedia.org/wiki/Electric_current">An electric current is a flow of charged particles.</a>
+</body></html>'''
+
+BING_RSS = '''<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel><title>Bing</title>
+<item><title>James Gandolfini - IMDb</title><link>https://www.imdb.com/name/nm0001254/</link><description>James Gandolfini, Actor: The Sopranos.</description></item>
+</channel></rss>'''
+
+
+class IntentAndToolTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.agent = Agent(self.root, emit=lambda *a, **kw: None, confirm=lambda _: False)
+        self.browser = patch('app.tz_preview.webbrowser.open', return_value=True)
+        self.browser.start()
+
+    def tearDown(self):
+        self.agent.preview.close()
+        self.browser.stop()
+        self.tmp.cleanup()
+
+    def test_browser_phrasings_open_google_search_without_model(self):
+        cases = {
+            'open the browser and look up the time in japan': 'the+time+in+japan',
+            'hello can u opent the browser and look up lil waynes most recent track': 'lil+waynes+most+recent+track',
+            'open the web browser and type in what time is it in new mexico?': 'what+time+is+it+in+new+mexico',
+            'look up james gandolfini in the browser': 'james+gandolfini',
+            'google chicken soup recipe in the browser': 'chicken+soup+recipe',
+            'please open the browser, search for cats.': 'cats',
+            'Open my browser and find out who won the world series': 'who+won+the+world+series',
+        }
+        with patch.object(self.agent, 'stream', side_effect=AssertionError('No model needed')):
+            for text, encoded in cases.items():
+                with self.subTest(text=text):
+                    self.assertEqual(self.agent.direct(text), ('open_target', {'target': 'https://www.google.com/search?q=' + encoded}))
+            for text in ['open the webbrowser', 'open it in the browser for me', 'opent the web rbwoser so i can see it',
+                         'open google', 'can you open the browser please']:
+                with self.subTest(text=text):
+                    self.assertEqual(self.agent.direct(text), ('open_target', {'target': 'https://www.google.com'}))
+
+    def test_open_it_uses_last_search_or_fetch(self):
+        self.agent.messages = [{'role': 'user', 'content': 'search lil wayne'},
+                               {'role': 'assistant', 'content': 'Tool evidence (data): {"query": "lil wayne", "provider": "DuckDuckGo HTML", "results": []}'}]
+        self.assertEqual(self.agent.direct('open it in the browser'), ('open_target', {'target': 'https://www.google.com/search?q=lil+wayne'}))
+        self.agent.messages.append({'role': 'tool', 'tool_name': 'fetch_url', 'content': '{"url": "https://example.com/page", "text": "x"}'})
+        self.assertEqual(self.agent.direct('open that in the browser')[1]['target'], 'https://example.com/page')
+        self.agent.messages.append({'role': 'assistant', 'content': '', 'tool_calls': [{'function': {'name': 'web_search', 'arguments': {'query': 'gandolfini'}}}]})
+        self.agent.messages.append({'role': 'tool', 'tool_name': 'web_search', 'content': '{"error": "no relevant results", "verified": false}'})
+        self.assertEqual(self.agent.direct('google it in the browser')[1]['target'], 'https://www.google.com/search?q=gandolfini')
+
+    def test_url_open_and_fetch_rules_still_work(self):
+        self.assertEqual(self.agent.direct('open https://example.com'), ('open_target', {'target': 'https://example.com'}))
+        self.assertEqual(self.agent.direct('read https://example.com')[0], 'fetch_url')
+        self.assertIsNone(self.agent.direct('hello'))
+
+    def test_time_intents_are_local(self):
+        cases = {'what time is it in japan': 'japan', 'look up the time in albuquerque nm': 'albuquerque nm',
+                 'time in portsmouth nh': 'portsmouth nh', 'what time is it': 'here', "what's the time": 'here',
+                 'whats the time in new york?': 'new york', 'what is the current time in london right now': 'london'}
+        for text, zone in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.agent.direct(text), ('local_time', {'zone': zone}))
+        self.assertEqual(self.agent.direct('open the browser and look up the time in japan')[0], 'open_target')
+
+    def test_local_time_tool_with_fixed_clock(self):
+        with patch.object(Agent, 'clock', return_value=datetime(2026, 9, 18, 18, 34, tzinfo=timezone.utc)):
+            result = self.agent.tool('local_time', {'zone': 'japan'})
+            self.assertEqual(result['zone'], 'Asia/Tokyo')
+            self.assertEqual(result['time'], '2026-09-19 03:34:00')
+            self.assertEqual(result['utc_offset'], '+09:00')
+            self.assertEqual(result['clock'], '3:34 AM')
+            self.assertEqual(result['day'], 'Saturday')
+            self.assertEqual(self.agent.tool('local_time', {'zone': 'Albuquerque NM'})['zone'], 'America/Denver')
+            self.assertEqual(self.agent.tool('local_time', {'zone': 'asia/tokyo'})['zone'], 'Asia/Tokyo')
+            self.assertEqual(self.agent.tool('local_time', {'zone': 'in portsmouth nh'})['time'], '2026-09-18 14:34:00')
+            self.assertEqual(self.agent.tool('local_time', {'zone': 'utc'})['utc_offset'], '+00:00')
+            self.assertEqual(self.agent.tool('local_time', {'zone': 'here'})['place'], 'here')
+        with self.assertRaisesRegex(ValueError, 'open_target'):
+            self.agent.tool('local_time', {'zone': 'atlantis'})
+
+    def test_search_parses_duckduckgo_and_unwraps_links(self):
+        with patch('app.tz_agent.get_url', return_value=('u', 'text/html', DDG_HTML)):
+            result = self.agent.tool('web_search', {'query': 'James Gandolfini biography'})
+        self.assertEqual(result['provider'], 'DuckDuckGo HTML')
+        self.assertEqual(result['results'][0], {'title': 'James Gandolfini - Wikipedia', 'url': 'https://en.wikipedia.org/wiki/James_Gandolfini',
+                                                'snippet': 'James John Gandolfini (September 18, 1961 – June 19, 2013) was an American actor.'})
+        self.assertEqual(result['results'][1]['url'], 'https://www.britannica.com/biography/James-Gandolfini')
+        self.assertEqual(result['results'][1]['title'], 'James Gandolfini | Biography & Facts - Britannica')
+
+    def test_search_relevance_guard_rejects_junk(self):
+        with patch('app.tz_agent.get_url', return_value=('u', 'text/html', JUNK_HTML)):
+            with self.assertRaisesRegex(ValueError, 'no relevant results'):
+                self.agent.tool('web_search', {'query': 'current time in Albuquerque NM'})
+
+    def test_search_falls_back_to_bing_when_duckduckgo_fails(self):
+        def fetch(url, timeout=20, headers=None):
+            if 'duckduckgo' in url: raise OSError('connection refused')
+            return url, 'application/rss+xml', BING_RSS
+        with patch('app.tz_agent.get_url', side_effect=fetch):
+            result = self.agent.tool('web_search', {'query': 'James Gandolfini biography'})
+        self.assertEqual(result['provider'], 'Bing RSS')
+        self.assertEqual(result['results'][0]['url'], 'https://www.imdb.com/name/nm0001254/')
+        with patch('app.tz_agent.get_url', side_effect=OSError('offline')):
+            with self.assertRaisesRegex(ValueError, 'no results'):
+                self.agent.tool('web_search', {'query': 'James Gandolfini biography'})
 
 
 if __name__ == '__main__': unittest.main()

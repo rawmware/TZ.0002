@@ -3,3 +3,5 @@ pypdf>=6.1,<7
 rich>=13,<15
 prompt_toolkit>=3.0,<4
 psutil>=5.9,<8
+# Pure-Python IANA time zone data; Windows has no system tz database, so zoneinfo (local_time tool) needs it.
+tzdata>=2024.1
