@@ -40,3 +40,6 @@ config/tz.local.json
 /agent-smoke.html
 /hello.md
 /note.md
+
+# Claude Code agent worktrees
+/.claude/
