@@ -35,3 +35,8 @@ config/tz.local.json
 
 /archive/
 *.legacy-backup
+
+# Scratch outputs from agent smoke tests
+/agent-smoke.html
+/hello.md
+/note.md
