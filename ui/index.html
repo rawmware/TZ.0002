@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TZ</title>
+<link rel="icon" href="icons/tz.svg">
+<link rel="stylesheet" href="desktop.css">
+</head>
+<body>
+<div id="progman" class="win progman active" data-name="progman">
+  <div class="win-title">
+    <div class="sysmenu" id="pm-sysmenu" title="System menu"></div>
+    <span class="title-text">TZ &mdash; Program Manager</span>
+    <div class="tbtn" id="pm-min" title="Minimize">&#9660;</div>
+    <div class="tbtn" id="pm-max" title="Maximize">&#9650;</div>
+  </div>
+  <div class="menubar" id="pm-menubar">
+    <span class="menu-item" data-menu="file">File</span>
+    <span class="menu-item" data-menu="options">Options</span>
+    <span class="menu-item" data-menu="window">Window</span>
+    <span class="menu-item" data-menu="help">Help</span>
+  </div>
+  <div id="desktop" tabindex="0">
+    <div id="icons"></div>
+    <div id="windows"></div>
+    <div id="minis"></div>
+  </div>
+</div>
+<div id="status">
+  <span id="status-left">[offline]</span>
+  <span id="status-right"></span>
+</div>
+<div id="boot"><pre id="boot-text"></pre></div>
+<script src="desktop.js"></script>
+</body>
+</html>
