@@ -134,3 +134,28 @@ Sentences starting with build/create/fix/… that mention code/app/html/etc. rou
 9. `/status`, `/hardware`, `/exit`
 
 If a step misbehaves, `data/tz/events.jsonl` has the tool-by-tool audit log and `data/tz/<session-id>.json` has the full conversation — `python tz.py --resume <session-id>` picks it back up.
+
+## 11. After the 2026-09-19 fixes (docs 05/07) — six manual checks
+
+Run `roman` and type, in order:
+
+1. `open the browser and look up the time in japan` → your real browser opens a Google search; the log shows `[route] DIRECT · open_target · no model needed`.
+2. `what time is it in japan` → instant `local_time` answer with `Asia/Tokyo`; no model.
+3. `look up who james gandolfini was` → either relevant search results (DuckDuckGo first, Bing RSS second) or a clear `Search returned no relevant results ... Use /open` error. **Never** an invented biography. If the model still answers from memory, that is B3; note the wording.
+4. `/use qwen 3.6` → resolves to `qwen3.6:latest` and asks `... 22 GB; this GPU has 8 GB VRAM ... Continue? [y/N]` — answer `n`.
+5. `/auto` → prints `Routing: AUTO · task model tz-agent:latest`.
+6. `hello?` → answer in under 3 s once the warm-up has run (it starts right after the specs box).
+
+Also: Ctrl+C at the idle `Me >` prompt must NOT print "Canceled. Partial output is unverified." any more; only a Ctrl+C during a running turn does.
+
+## 12. The desktop UI (Windows 3.x window in the browser)
+
+- After the specs box TZ asks `Would you like to open UI? (Y/N)  [Enter = N]`. `Y` opens the desktop in your default browser; the terminal keeps working. `/ui` opens it later, `/ui close` stops it, `/ui always|never|ask` remembers the answer in `config/tz.local.json`.
+- Boot screen prints the specs, then the Program Manager desktop appears with Start, Chat, Search, Browser, Files, Settings and Clock.
+- **Start**: type `what time is it in portsmouth nh` → the Chat window opens with the answer. Type `hello?` → streamed model answer; the same lines print in the terminal.
+- **Chat**: `◀ ▶` pages through saved sessions (`data/tz/*.json`) and resumes them; `New` starts a fresh one. Typing in the terminal shows up here too.
+- **Search**: double-click `Time in Japan` (instant, no model) and `Latest news` (opens Google in the real browser). `+ New preset` saves to `tz.local.json` → `ui.presets`; right-click/Delete removes.
+- **Files**: File Manager over the workspace, read-only; click a text file to view it.
+- **Settings**: wallpaper colour/image, model + AUTO/MANUAL, "Open UI on start", startup chime. OK writes `tz.local.json` → `ui`.
+- An overwrite (`create "x.txt" containing "a"` twice) pops a Yes/No message box in the desktop when the request came from the desktop; from the terminal it still asks in the terminal.
+- Only `127.0.0.1`, random port, 32-hex token in the URL, CSP `default-src 'self'`; nothing external is loaded.

@@ -54,7 +54,7 @@ After each push, append a line to the table at the bottom of this file with the 
 2. `python --version` (need 3.10+), `ollama --version`, `ollama list` — which of `tz-agent:latest`, `gemma3:1b` exist? Run `python install.py --setup-model --desktop` if `tz-agent` is missing.
 3. `python -m pip install -r requirements.txt`
 4. `python tz.py --doctor` → must print `Ready: tz-agent:latest`.
-5. `python -m unittest discover -s tests -p "test_*.py"` → note the count; desktop is 54 green.
+5. `python -m unittest discover -s tests -p "test_*.py"` → note the count; desktop is 101 green as of 2026-09-19. Run `python -m pip install -r requirements.txt` first (`tzdata` is new).
 6. `python tz.py` → specs box shows the laptop's CPU/GPU/VRAM correctly (`Hardware.collect()` uses `nvidia-smi` and WMI; a laptop with Intel/AMD graphics or no dGPU is the first time that code path runs without an NVIDIA card — watch for a crash or a blank GPU line).
 7. Register the launch word: inside TZ, `/passcode roman` — `tz.local.json` is per-machine, so the laptop does not know `roman` until this is done.
 8. Run the six manual tests from doc 05 (after those fixes are pushed).
@@ -72,4 +72,8 @@ Things that could genuinely break on the laptop and have never been exercised:
 | Date | Hash | What | Laptop pulled? |
 |---|---|---|---|
 | 2026-09-17 | `a38469c` | `/team` subagents + status line | no |
-| 2026-09-18 | _(fill in)_ | planning docs 04–08 | no |
+| 2026-09-19 | `0fdc7b5` | planning docs 04–08, UI API contract, `.gitignore` scratch | no |
+| 2026-09-19 | `0071eaf` | B1–B4: browser intents, DDG/Bing search + relevance guard, `local_time` (+ `tzdata` in requirements) | no |
+| 2026-09-19 | `0165c74` | B5–B7: `Agent.command()` layer, sessions, `/auto` reset, fuzzy `/use` + VRAM warning, warm-up, honest Ctrl+C, Y/N UI prompt | no |
+| 2026-09-19 | `3584b78` | UI server `app/tz_ui.py` + `config/ui.defaults.json` + `tests/test_ui.py` | no |
+| 2026-09-19 | _(see git log)_ | UI front end `ui/` (phases 1–4), Chat double-load fix, docs | no |

@@ -1,6 +1,6 @@
 # TZ Virtual Desktop UI — Vision — 2026-09-18
 
-**Status: concept.** Roman is conceptualizing, not committing to build. This doc captures the idea in his words and turns it into concrete screens so the next conversation can build it when he says go. The technical plan is doc 07.
+**Status: built 2026-09-19 (phases 0-4 of doc 07).** Roman said "begin building now" and this is what shipped: `app/tz_ui.py` + `ui/`. The technical plan is doc 07; the API contract is `docs/TZ-UI-API-2026-09-19.md`. Decisions on the open questions are at the bottom.
 
 ## The idea, in Roman's words (lightly cleaned up)
 
@@ -116,3 +116,12 @@ Later ideas Roman may like: **Team** (the `/team` subagent receipts as a "Print 
 2. Win 3.1 (no taskbar, minimize-to-icon) or Win 95 (taskbar + Start button) — the "Start" icon name pulls both ways. Default: Win 3.1 chrome with a Win95-style bottom status strip.
 3. Should closing the desktop window end the session? Default: no.
 4. Wallpaper: solid color only in v1, image files in v1.5?
+
+## Decisions made while building (2026-09-19)
+
+1. **Browser tab**, not a native window (doc 07 option A). pywebview stays optional phase 5.
+2. **Win 3.1 chrome** (no taskbar, minimize-to-icon) **with a Win95-style bottom status strip** mirroring the terminal status line.
+3. **Closing the browser tab does not end the session**; the server keeps running until `/ui close` or exit.
+4. **Wallpaper: solid colour and workspace image files** both landed in v1 (Settings window).
+5. Default presets live in the tracked `config/ui.defaults.json`; Roman's additions/removals go to the gitignored `config/tz.local.json` under `ui`, so the laptop gets the same defaults from `git pull`.
+6. Extra windows beyond the plan: Help → About, Window → Cascade/Tile, a system-menu box on every window.

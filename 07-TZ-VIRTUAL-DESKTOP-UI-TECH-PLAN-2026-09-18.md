@@ -1,6 +1,6 @@
 # TZ Virtual Desktop UI — Technical Plan — 2026-09-18
 
-Companion to doc 06 (vision). This is how to build it on top of the code that exists today, in phases small enough to commit and push one at a time (doc 08). Nothing here is started yet.
+Companion to doc 06 (vision). **Built 2026-09-19: phases 0-4 are on `main`** (`app/tz_ui.py`, `ui/`, `config/ui.defaults.json`, `tests/test_ui.py`, `tests/test_commands.py`). The interfaces actually implemented are in `docs/TZ-UI-API-2026-09-19.md`; where this plan and that file differ, the contract file wins. Phase 5 (pywebview) is not started.
 
 ## Recommendation in one paragraph
 

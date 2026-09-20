@@ -801,15 +801,19 @@ const Chat = {
 
   async load() {
     if (!this.win || this.win.closed) return;
-    // live lines that arrive while the history is fetched stay; only the old content is replaced
+    // live lines that arrive while the history is fetched stay; only the old content is replaced.
+    // A resume triggers both page() and the 'session' event, so a newer load supersedes this one.
+    const seq = this.loadSeq = (this.loadSeq || 0) + 1;
     const stale = [...this.log.children];
     let frag;
     try {
       const s = await api.get('sessions/current');
+      if (seq !== this.loadSeq) return;
       this.sessionId = s.id || '';
       frag = this.renderMessages(s.messages);
       this.win.setTitle('Chat — ' + this.sessionId);
     } catch (e) {
+      if (seq !== this.loadSeq) return;
       frag = this.renderMessages([]);
       frag.append(el('div', { class: 'dim', text: '[offline] ' + e.message }));
       this.win.setTitle('Chat — offline');
