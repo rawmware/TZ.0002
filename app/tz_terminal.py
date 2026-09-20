@@ -36,6 +36,18 @@ class Hardware:
         self.stop = threading.Event()
         self.thread = None
         self.inventory = None
+        self.vram = None
+        self.vram_known = False
+
+    def vram_total(self):
+        """Bytes of VRAM on GPU0 via nvidia-smi, sampled once. None without a working NVIDIA GPU."""
+        if not self.vram_known:
+            self.vram_known = True
+            out = helper(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'], timeout=4)
+            first = (out or '').strip().splitlines()[:1]
+            try: self.vram = int(float(first[0].strip().split(',')[0]) * 1024 * 1024) if first else None
+            except ValueError: self.vram = None
+        return self.vram
 
     def start(self):
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -228,6 +240,11 @@ class Terminal:
         self.note = None
         self.code_lines = None
         self.code_language = None
+        # Re-entrant: emit -> commit_lines -> print_line all take it. A UI worker thread may print
+        # while the main thread sits at the prompt.
+        self.lock = threading.RLock()
+        self.turn_active = False
+        self.interrupted = False
         if self.enabled:
             try:
                 from rich.console import Console
@@ -262,6 +279,9 @@ class Terminal:
         return min(100, max(20, self.console.width))
 
     def emit(self, value='', end='\n', flush=False):
+        with self.lock: self._emit(value, end, flush)
+
+    def _emit(self, value, end, flush):
         from app.tz_agent import clean
         value = clean(value)
         if not self.enabled:
@@ -301,6 +321,9 @@ class Terminal:
             self.print_line(line)
 
     def print_line(self, line):
+        with self.lock: self._print_line(line)
+
+    def _print_line(self, line):
         from rich.text import Text
         self.open_reply()
         fence = line.lstrip()
@@ -320,6 +343,9 @@ class Terminal:
 
     def print_code(self):
         """A finished fenced block is highlighted once, in place. Nothing above it redraws."""
+        with self.lock: self._print_code()
+
+    def _print_code(self):
         lines, language = self.code_lines or [], self.code_language or 'text'
         self.code_lines = self.code_language = None
         if not lines: return
@@ -336,18 +362,20 @@ class Terminal:
                                  title=language, title_align='left'), width=self.measure())
 
     def open_reply(self):
-        if self.reply_open: return
-        self.reply_open = True
-        from app.tz_agent import clean
-        self.console.print()
-        self.console.rule(self.reply_title or f'AI  ·  {clean(self.agent.model)}', align='left', style='green')
+        with self.lock:
+            if self.reply_open: return
+            self.reply_open = True
+            from app.tz_agent import clean
+            self.console.print()
+            self.console.rule(self.reply_title or f'AI  ·  {clean(self.agent.model)}', align='left', style='green')
 
     def close_reply(self, note=''):
-        if self.code_lines is not None: self.print_code()
-        if not self.reply_open: return
-        self.reply_open = False
-        self.console.rule(note, align='left', style='yellow' if note else 'green')
-        self.console.print()
+        with self.lock:
+            if self.code_lines is not None: self.print_code()
+            if not self.reply_open: return
+            self.reply_open = False
+            self.console.rule(note, align='left', style='yellow' if note else 'green')
+            self.console.print()
 
     # ------------------------------------------------------------------ panels
 
@@ -451,8 +479,14 @@ class Terminal:
         color = '' if 'NO_COLOR' in os.environ else '\x1b[36m'
         reset = '' if 'NO_COLOR' in os.environ else '\x1b[0m'
         try:
-            text = self.session.prompt(ANSI(color + 'Me > ' + reset),
-                bottom_toolbar=self.toolbar, refresh_interval=1)
+            # Lines printed by another thread (a UI-driven turn) land above the input box instead of inside it.
+            # Rich resolves sys.stdout at print time, so its output goes through the same proxy.
+            from prompt_toolkit.application.current import create_app_session
+            from prompt_toolkit.patch_stdout import patch_stdout
+            # The proxy must write through the prompt's own output object, not a second console handle.
+            with create_app_session(input=self.session.input, output=self.session.output), patch_stdout(raw=True):
+                text = self.session.prompt(ANSI(color + 'Me > ' + reset),
+                    bottom_toolbar=self.toolbar, refresh_interval=1)
         except (EOFError, KeyboardInterrupt):
             raise
         except Exception:
@@ -468,13 +502,46 @@ class Terminal:
                                      border_style='dim', padding=(0, 1), width=self.measure()))
         return text
 
+    def yes_no(self, question, default=False, hint=''):
+        """One Y/N line: '<question> (Y/N)  [Enter = N]'. Empty answer means the default.
+
+        Not interactive (no TTY, tests, --prompt): returns the default without touching stdin.
+        `hint` is shown dimmed under the line while it waits.
+        """
+        if not self.enabled: return default
+        label = f'{question} (Y/N)  [Enter = {"Y" if default else "N"}] '
+        try:
+            from prompt_toolkit import PromptSession
+            from prompt_toolkit.styles import Style
+            session = PromptSession(style=Style.from_dict({'bottom-toolbar': 'noreverse fg:ansibrightblack bg:default'}))
+            for _ in range(3):
+                answer = session.prompt(label, bottom_toolbar=(hint or None)).strip().lower()
+                if answer in ('y', 'yes'): return True
+                if answer in ('n', 'no'): return False
+                if not answer: return default
+        except (EOFError, KeyboardInterrupt):
+            return default
+        except Exception:
+            # A prompt failure must never block start-up.
+            return default
+        return default
+
     # ---------------------------------------------------------------- activity
 
     @contextlib.contextmanager
     def activity(self):
-        if not self.enabled:
-            yield
-            return
+        """Marks one turn as running. `interrupted` stays set after a Ctrl+C so the loop can report it honestly."""
+        self.turn_active, self.interrupted = True, False
+        try:
+            with (self.live_panel() if self.enabled else contextlib.nullcontext()): yield
+        except KeyboardInterrupt:
+            self.interrupted = True
+            raise
+        finally:
+            self.turn_active = False
+
+    @contextlib.contextmanager
+    def live_panel(self):
         from rich.live import Live
         from rich.panel import Panel
         from rich.text import Text

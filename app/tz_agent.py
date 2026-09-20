@@ -345,7 +345,11 @@ class Agent:
         if not self.workspace.is_dir(): raise ValueError('Workspace directory does not exist: ' + str(self.workspace))
         self.model = model or os.environ.get('TZ_MODEL', 'tz-agent:latest')
         self.task_model = self.model
+        self.default_model = self.model
         self.routing = 'manual' if model or os.environ.get('TZ_MODEL') else 'auto'
+        # Held only while command() runs; turn() is never locked (team workers share this object).
+        self.lock = threading.Lock()
+        self.desktop = None
         self.last_response = None
         self.model_description = self.model
         self.base_url = (base_url or os.environ.get('OLLAMA_HOST', 'http://127.0.0.1:11434')).rstrip('/')
@@ -857,6 +861,223 @@ class Agent:
             self.save()
         raise RuntimeError(f'Stopped after {self.rounds} agent rounds. Completed actions are logged; task completion is unverified.')
 
+    # ------------------------------------------------------------ command layer
+
+    def command(self, text):
+        """One entry point for the terminal and the desktop UI: slash commands here, everything else to turn()."""
+        if not self.lock.acquire(blocking=False): raise RuntimeError('TZ is busy with another request.')
+        try: return self._command(text)
+        finally: self.lock.release()
+
+    def _command(self, text):
+        s = text.strip()
+        word, _, rest = s.partition(' ')
+        rest = rest.strip()
+        if s == '/help':
+            help_text = HELP.replace('TZ - local task agent', clean(self.label) + ' - local task agent', 1)
+            if self.terminal: self.terminal.help(help_text)
+            else: self.emit(help_text)
+            return {'help': help_text}
+        if s == '/tools':
+            names = [t['function']['name'] for t in self.tools]
+            self.emit(', '.join(names))
+            return {'tools': names}
+        if s == '/status':
+            self.status()
+            self.emit(f'Workspace: {self.workspace} | Session: {self.id}')
+            if self.terminal: self.terminal.specs()
+            return {'label': self.label, 'model': self.model, 'model_description': self.model_description,
+                    'task_model': self.task_model, 'routing': self.routing, 'session': self.id,
+                    'workspace': str(self.workspace)}
+        if s in ('/specs', '/hardware', '/verbose'):
+            if not self.terminal: raise ValueError(s + ' needs the interactive terminal.')
+            if s == '/specs':
+                self.terminal.specs(refresh=True)
+                return {'specs': self.terminal.hardware.specs()}
+            if s == '/hardware':
+                self.emit('[live load] ' + self.terminal.hardware.readings)
+                return {'readings': self.terminal.hardware.readings}
+            self.terminal.verbose = not self.terminal.verbose
+            self.emit('Detail lines ' + ('shown.' if self.terminal.verbose else 'hidden.'))
+            return {'verbose': self.terminal.verbose}
+        if s == '/clear':
+            self.messages = []; self.pending_request = None
+            self.opencode_session = None; self.last_backend = None
+            self.save(); self.emit('Context cleared.')
+            return {'cleared': True, 'id': self.id}
+        if word == '/models': return self.list_models(rest)
+        if word == '/use': return self.use_model(rest)
+        if s == '/auto':
+            # B5: AUTO must also drop a pinned task model, or the reset is not a reset.
+            self.routing = 'auto'
+            self.task_model = self.model = self.default_model
+            self.capabilities, self.model_description = None, self.default_model
+            self.emit(f'Routing: AUTO · task model {self.default_model}')
+            return {'routing': 'auto', 'task_model': self.default_model}
+        if s == '/sessions':
+            found = self.sessions()
+            rows = [(('* ' if x['current'] else '') + x['id'],
+                     time.strftime('%Y-%m-%d %H:%M', time.localtime(x['started'])), str(x['turns']), x['title']) for x in found]
+            if self.terminal: self.terminal.table('Sessions', ['ID', 'Started', 'Turns', 'Title'], rows)
+            else:
+                for row in rows: self.emit('  '.join(row))
+            return {'sessions': found}
+        if word == '/resume':
+            if not rest: raise ValueError('Use /resume ID (see /sessions).')
+            result = self.resume(rest)
+            self.emit(f'Resumed {result["id"]} ({result["turns"]} turns)')
+            return result
+        if s == '/new':
+            result = self.new_session()
+            self.emit('New session ' + result['id'])
+            return result
+        if word == '/ui':
+            if not rest: return self.open_desktop()
+            if rest == 'close': return self.close_desktop()
+            if rest in ('always', 'never', 'ask'):
+                try: from app.tz_ui import set_open_mode
+                except ImportError: raise ValueError('Desktop UI is not available.')
+                mode = set_open_mode(rest)
+                self.emit('UI on start: ' + str(mode))
+                return {'ui': mode}
+            raise ValueError('Use /ui [close|always|never|ask].')
+        return self.turn(text)
+
+    def installed_models(self):
+        """[{'name', 'size'}] from Ollama; size in bytes (0 when unreported)."""
+        return [{'name': m['name'], 'size': int(m.get('size') or 0)} for m in self.api('/api/tags').get('models', [])]
+
+    def list_models(self, pattern=''):
+        models = self.installed_models()
+        if pattern:
+            key = pattern.lower()
+            models = [m for m in models if key in m['name'].lower()]
+        if not models: self.emit('No installed model matches ' + repr(pattern) + '.' if pattern else 'No models installed.')
+        for m in models:
+            self.emit(f'{m["name"]:<44} {m["size"] / 2**30:5.1f} GB' if m['size'] else m['name'])
+        return {'models': models}
+
+    @staticmethod
+    def resolve_model(text, names):
+        """B5: '/use qwen 3.6' and '/use qwen3.6' both mean qwen3.6:latest when that is the only fit."""
+        key = re.sub(r'\s+', '', text).lower()
+        if not key: raise ValueError('Use /use MODEL (see /models).')
+        if text in names: return text
+        exact = [n for n in names if n.lower() == key]
+        if exact: return exact[0]
+        matches = [n for n in names if n.lower().replace(' ', '').startswith(key) or n.split(':')[0].lower() == key]
+        if len(matches) == 1: return matches[0]
+        if matches: raise ValueError('Ambiguous model: ' + ', '.join(matches) + '. Be more specific.')
+        raise ValueError('Model not installed. See /models.')
+
+    def use_model(self, text):
+        models = self.installed_models()
+        name = self.resolve_model(text.strip(), [m['name'] for m in models])
+        size = next((m['size'] for m in models if m['name'] == name), 0)
+        vram = self.terminal.hardware.vram_total() if self.terminal else None
+        if size and vram and size > 0.85 * vram:
+            question = (f'{name} is {size / 2**30:.0f} GB; this GPU has {vram / 2**30:.0f} GB VRAM. '
+                        f'It will run mostly on CPU and may exceed the {self.timeout:g}s timeout. Continue?')
+            if not self.confirm(question): raise ValueError('Model switch declined.')
+        self.model, self.capabilities = name, None
+        self.task_model, self.routing = name, 'manual'
+        self.model_description = name
+        self.emit('Using ' + name)
+        return {'model': name}
+
+    # ------------------------------------------------------------------ sessions
+
+    @staticmethod
+    def check_session_id(session_id):
+        if not isinstance(session_id, str) or not re.fullmatch(r'[a-zA-Z0-9-]+', session_id):
+            raise ValueError('Invalid session ID')
+        return session_id
+
+    @staticmethod
+    def session_started(session_id, path=None):
+        """Local epoch time from the id's %Y%m%d-%H%M%S prefix, else the file's mtime."""
+        try: return time.mktime(time.strptime(session_id[:15], '%Y%m%d-%H%M%S'))
+        except (ValueError, OverflowError):
+            try: return path.stat().st_mtime if path else 0.0
+            except OSError: return 0.0
+
+    @staticmethod
+    def session_title(messages):
+        first = next((m.get('content', '') for m in messages if m.get('role') == 'user'), '')
+        first = ' '.join(str(first).split())
+        return clean(first)[:60] if first else '(empty)'
+
+    def sessions(self):
+        found = []
+        for path in (sorted(self.state.glob('*.json')) if self.state.is_dir() else []):
+            if not re.fullmatch(r'[a-zA-Z0-9-]+', path.stem): continue
+            try: data = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, ValueError): continue
+            messages = data.get('messages') if isinstance(data, dict) else None
+            if not isinstance(messages, list): continue
+            if path.stem == self.id: messages = self.messages
+            found.append({'id': path.stem, 'started': self.session_started(path.stem, path),
+                          'title': self.session_title(messages),
+                          'turns': sum(1 for m in messages if m.get('role') == 'user'), 'current': path.stem == self.id})
+        if not any(x['current'] for x in found):
+            found.append({'id': self.id, 'started': self.session_started(self.id), 'title': self.session_title(self.messages),
+                          'turns': sum(1 for m in self.messages if m.get('role') == 'user'), 'current': True})
+        found.sort(key=lambda x: (x['started'], x['id']), reverse=True)
+        return found
+
+    def load_session(self, session_id):
+        path = self.state / (self.check_session_id(session_id) + '.json')
+        if not path.is_file(): raise ValueError('Session not found: ' + session_id)
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(data, dict) or not isinstance(data.get('messages'), list):
+            raise ValueError('Session file is not readable: ' + session_id)
+        return data
+
+    def session(self, session_id):
+        if session_id == 'current' or session_id == self.id: return {'id': self.id, 'messages': self.messages}
+        return {'id': session_id, 'messages': self.load_session(session_id)['messages']}
+
+    def resume(self, session_id):
+        saved = self.load_session(session_id)
+        if self.messages and session_id != self.id: self.save()
+        self.messages = saved['messages']
+        self.model = saved.get('model') or self.model
+        self.task_model = saved.get('task_model') or self.model
+        self.routing = saved.get('routing', self.routing)
+        self.capabilities, self.model_description = None, self.model
+        self.opencode_session = saved.get('opencode_session')
+        self.last_backend = saved.get('last_backend')
+        self.pending_request = None
+        self.id = session_id
+        return {'id': session_id, 'turns': sum(1 for m in self.messages if m.get('role') == 'user')}
+
+    def new_session(self):
+        if self.messages: self.save()
+        self.messages = []
+        self.pending_request = self.opencode_session = self.last_backend = None
+        self.id = time.strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:6]
+        return {'id': self.id}
+
+    # ------------------------------------------------------------------- desktop
+
+    def open_desktop(self):
+        try: from app.tz_ui import Desktop
+        except ImportError: raise ValueError('Desktop UI is not available.')
+        if self.desktop is None: self.desktop = Desktop(self, self.terminal)
+        url = self.desktop.open()
+        if not getattr(self, 'desktop_atexit', False):
+            self.desktop_atexit = True
+            atexit.register(self.close_desktop)
+        self.emit('[ui] ' + url)
+        return {'url': url}
+
+    def close_desktop(self):
+        if self.desktop is None: return {'closed': False}
+        desktop, self.desktop = self.desktop, None
+        desktop.close()
+        self.emit('[ui] closed')
+        return {'closed': True}
+
 
 HELP = '''TZ - local task agent
   /read "path" [offset] [limit]  Read text or PDF without a model
@@ -864,8 +1085,10 @@ HELP = '''TZ - local task agent
   /search words                Search and show source links
   /run ["python", "script.py"]  Execute an explicit command without a shell
   /open path-or-URL            Open the default application
-  /models | /use MODEL         Inspect or select installed Ollama models
-  /auto | /fast | /code        Automatic, small-model, or task-model routing
+  /models [filter] | /use MODEL  Inspect or select installed Ollama models (fuzzy: /use qwen 3.6)
+  /auto | /fast | /code        Automatic, small-model, or task-model routing (/auto resets the task model)
+  /sessions | /resume ID | /new  List saved sessions, continue one, or start a fresh one
+  /ui [close|always|never|ask]  Open or close the desktop UI; remember whether to open it on start
   /hardware                    Live load right now (CPU, RAM, GPU, VRAM)
   /specs                       This machine: CPU, memory, GPU, disk, runtime
   /verbose                     Show or hide [route] [model] [usage] [tool] lines
@@ -881,6 +1104,35 @@ New workspace files run immediately. Replacements and model-requested commands a
 Ctrl+C cancels the current model request. Saved sessions are under data/tz/.'''
 
 
+def warm_up(agent):
+    """B6: load the fast model and the task model in the background so the first reply is not a cold start.
+
+    Uses the same num_ctx/num_gpu options as stream(), otherwise Ollama would reload the model on first use.
+    Never blocks the prompt; every failure is swallowed. Set TZ_NO_WARMUP to skip (tests).
+    """
+    if os.environ.get('TZ_NO_WARMUP'): return None
+
+    def run():
+        try: names = {m['name'] for m in agent.api('/api/tags').get('models', [])}
+        except Exception: return
+        fast = os.environ.get('TZ_FAST_MODEL')
+        choices = [fast] if fast else ['gemma3:1b', 'qwen3:0.6b', 'qwen3:1.7b']
+        targets = [m for m in choices if m in names][:1] + [agent.task_model]
+        for model in dict.fromkeys(targets):
+            body = {'model': model, 'keep_alive': '30m', 'options': {'num_ctx': 8192}}
+            if model == 'gemma3:1b': body['options']['num_gpu'] = 0
+            try:
+                req = urllib.request.Request(agent.base_url + '/api/generate', data=json.dumps(body).encode(),
+                                             headers={'Content-Type': 'application/json'})
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoInferenceRedirect())
+                with opener.open(req, timeout=120) as response: response.read()
+            except Exception: pass
+
+    thread = threading.Thread(target=run, daemon=True, name='tz-warmup')
+    thread.start()
+    return thread
+
+
 def main(argv=None):
     if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     parser = argparse.ArgumentParser(description='TZ local task agent; no PowerShell required.')
@@ -894,15 +1146,11 @@ def main(argv=None):
     if args.timeout <= 0: parser.error('--timeout must be positive')
     agent = Agent(args.workspace, args.model, args.timeout)
     if args.resume:
-        if not re.fullmatch(r'[a-zA-Z0-9-]+', args.resume): parser.error('Invalid session ID')
-        saved = json.loads((agent.state / (args.resume + '.json')).read_text(encoding='utf-8'))
-        agent.messages = saved['messages']
-        agent.model = args.model or saved['model']
-        agent.task_model = args.model or saved.get('task_model', saved['model'])
-        agent.routing = 'manual' if args.model else saved.get('routing', agent.routing)
-        agent.id = args.resume
-        agent.opencode_session = saved.get('opencode_session')
-        agent.last_backend = saved.get('last_backend')
+        try: agent.resume(args.resume)
+        except ValueError as exc: parser.error(str(exc))
+        if args.model:
+            agent.model = agent.task_model = agent.model_description = args.model
+            agent.routing = 'manual'
     if args.doctor:
         agent.display(agent.tool('system_info', {}))
         try:
@@ -915,7 +1163,7 @@ def main(argv=None):
     if args.prompt:
         agent.preview.live = False
         agent.confirm = lambda _: False
-        try: agent.turn(args.prompt); return 0
+        try: agent.command(args.prompt); return 0
         except (Exception, KeyboardInterrupt) as exc: print('[incomplete]', clean(exc)); return 1
     from app.tz_terminal import Terminal
     terminal = Terminal(agent)
@@ -924,41 +1172,31 @@ def main(argv=None):
     agent.terminal = terminal
     terminal.header()
     terminal.specs()
+    warm_up(agent)
+    try: from app.tz_ui import open_mode
+    except ImportError: open_mode = None
+    if open_mode:
+        try: mode = open_mode()
+        except Exception: mode = 'never'
+        if mode == 'always' or (mode == 'ask' and terminal.yes_no('Would you like to open UI?', default=False,
+                                                                  hint='(/ui opens it later; /ui always|never|ask remembers)')):
+            try: agent.open_desktop()
+            except Exception as exc: terminal.emit('[incomplete] ' + clean(str(exc)))
     while True:
         try:
             text = terminal.read().strip()
             if not text: continue
             if text in ('/exit', '/quit'): break
-            if text == '/help': terminal.help(HELP); continue
-            if text == '/tools': terminal.emit(', '.join(t['function']['name'] for t in TOOLS)); continue
-            if text == '/status':
-                agent.status()
-                terminal.emit(f'Workspace: {agent.workspace} | Session: {agent.id}')
-                terminal.specs(); continue
-            if text == '/specs': terminal.specs(refresh=True); continue
-            if text == '/hardware':
-                terminal.emit('[live load] ' + terminal.hardware.readings); continue
-            if text == '/verbose':
-                terminal.verbose = not terminal.verbose
-                terminal.emit('Detail lines ' + ('shown.' if terminal.verbose else 'hidden.')); continue
-            if text == '/clear':
-                agent.messages = []; agent.pending_request = None
-                agent.opencode_session = None; agent.last_backend = None
-                agent.save(); terminal.emit('Context cleared.'); continue
-            if text == '/models': terminal.emit('\n'.join(m['name'] for m in agent.api('/api/tags')['models'])); continue
-            if text.startswith('/use '):
-                model = text[5:].strip()
-                if model not in [m['name'] for m in agent.api('/api/tags')['models']]: raise ValueError('Model not installed. See /models.')
-                agent.model, agent.capabilities = model, None
-                agent.task_model, agent.routing = model, 'manual'
-                agent.model_description = model
-                terminal.emit('Using ' + model); continue
             # OpenCode's full-screen UI owns its terminal while it is running.
-            if text == '/opencode': agent.turn(text)
+            if text == '/opencode': agent.command(text)
             else:
-                with terminal.activity(): agent.turn(text)
+                with terminal.activity(): agent.command(text)
         except EOFError: break
-        except KeyboardInterrupt: terminal.emit('Canceled. Partial output is unverified.'); continue
+        except KeyboardInterrupt:
+            # B6: Ctrl+C at the idle prompt is not a canceled turn; only an interrupted turn earns the notice.
+            if terminal.interrupted: terminal.emit('Canceled. Partial output is unverified.')
+            terminal.interrupted = False
+            continue
         except Exception as exc: terminal.emit('[incomplete] ' + clean(str(exc)))
     terminal.emit(agent.label + ' offline.')
     terminal.close()
