@@ -1,0 +1,14 @@
+{
+  "open": "ask",
+  "wallpaper": "#008080",
+  "wallpaper_image": "",
+  "chime": false,
+  "removed": [],
+  "presets": [
+    {"id": "time-japan",      "name": "Time in Japan",         "phrase": "what time is it in japan",          "mode": "ask",     "icon": "clock"},
+    {"id": "time-new-mexico", "name": "Time in New Mexico",    "phrase": "what time is it in new mexico",     "mode": "ask",     "icon": "clock"},
+    {"id": "time-portsmouth", "name": "Time in Portsmouth NH", "phrase": "what time is it in portsmouth nh",  "mode": "ask",     "icon": "clock"},
+    {"id": "weather-here",    "name": "Weather here",          "phrase": "weather near me",                   "mode": "browser", "icon": "search"},
+    {"id": "latest-news",     "name": "Latest news",           "phrase": "latest news",                       "mode": "browser", "icon": "search"}
+  ]
+}
