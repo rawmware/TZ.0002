@@ -76,4 +76,4 @@ Things that could genuinely break on the laptop and have never been exercised:
 | 2026-09-19 | `0071eaf` | B1–B4: browser intents, DDG/Bing search + relevance guard, `local_time` (+ `tzdata` in requirements) | no |
 | 2026-09-19 | `0165c74` | B5–B7: `Agent.command()` layer, sessions, `/auto` reset, fuzzy `/use` + VRAM warning, warm-up, honest Ctrl+C, Y/N UI prompt | no |
 | 2026-09-19 | `3584b78` | UI server `app/tz_ui.py` + `config/ui.defaults.json` + `tests/test_ui.py` | no |
-| 2026-09-19 | _(see git log)_ | UI front end `ui/` (phases 1–4), Chat double-load fix, docs | no |
+| 2026-09-19 | `e2d4342`, `188c64a` | UI front end `ui/` (phases 1–4), Chat double-load fix, docs | no |
